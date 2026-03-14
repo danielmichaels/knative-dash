@@ -1,0 +1,220 @@
+use k8s_openapi::api::core::v1::{Event, Pod};
+use kube::api::{ListParams, LogParams};
+use kube::{Api, Client, ResourceExt};
+use std::collections::{HashMap, HashSet};
+
+use crate::error::AppError;
+use crate::types::{
+    extract_ingress_hostname, extract_ready_status, knative, traefik, ConditionSummary,
+    EventSummary, PingResult, ServiceSummary,
+};
+
+/// Returns namespace names that contain at least one Knative service.
+pub async fn fetch_namespaces_with_services(client: Client) -> Result<Vec<String>, AppError> {
+    let api: Api<knative::Service> = Api::all(client);
+    let services = api.list(&ListParams::default()).await?;
+
+    let mut namespaces: HashSet<String> = HashSet::new();
+    for svc in &services.items {
+        if let Some(ns) = svc.namespace() {
+            namespaces.insert(ns);
+        }
+    }
+
+    let mut result: Vec<String> = namespaces.into_iter().collect();
+    result.sort();
+    Ok(result)
+}
+
+/// Returns all Knative services in the given namespace as `ServiceSummary` values.
+/// External URLs are resolved from matching Traefik IngressRoutes when available.
+/// Also enriches each service with conditions, latest revision, image tag, and recent events.
+pub async fn fetch_services(
+    client: Client,
+    namespace: String,
+) -> Result<Vec<ServiceSummary>, AppError> {
+    let svc_api: Api<knative::Service> = Api::namespaced(client.clone(), &namespace);
+    let ir_api: Api<traefik::IngressRoute> = Api::namespaced(client.clone(), &namespace);
+    let rev_api: Api<knative::Revision> = Api::namespaced(client.clone(), &namespace);
+    let event_api: Api<Event> = Api::namespaced(client, &namespace);
+
+    let services = svc_api.list(&ListParams::default()).await?;
+    let ingress_routes = ir_api.list(&ListParams::default()).await;
+    let revisions = rev_api.list(&ListParams::default()).await;
+    let events = event_api.list(&ListParams::default()).await;
+
+    // Build name → external URL map from IngressRoutes. Silently ignore errors
+    // (RBAC may not permit listing IngressRoutes).
+    let external_urls: HashMap<String, String> = ingress_routes
+        .map(|list| list.items)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|ir| {
+            let name = ir.name_any();
+            let rule = ir.spec.routes.first().map(|r| r.rule.as_str())?;
+            let host = extract_ingress_hostname(rule)?;
+            let scheme = if ir.spec.entry_points.iter().any(|e| e == "websecure") {
+                "https"
+            } else {
+                "http"
+            };
+            Some((name, format!("{scheme}://{host}")))
+        })
+        .collect();
+
+    // Build revision name → image map. Silently ignore errors (RBAC).
+    let revision_images: HashMap<String, String> = revisions
+        .map(|list| list.items)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|rev| {
+            let name = rev.name_any();
+            let image = rev.spec.containers.into_iter().next().map(|c| c.image)?;
+            Some((name, image))
+        })
+        .collect();
+
+    // Build service name → recent events map. Filter to Knative Service objects only,
+    // keep the 5 most recent by lastTimestamp (or creationTimestamp as fallback).
+    let mut service_events: HashMap<String, Vec<EventSummary>> = HashMap::new();
+    for ev in events.map(|list| list.items).unwrap_or_default() {
+        let obj_ref = &ev.involved_object;
+        let is_knative_service = obj_ref.kind.as_deref() == Some("Service")
+            && obj_ref
+                .api_version
+                .as_deref()
+                .map(|v| v.starts_with("serving.knative.dev"))
+                .unwrap_or(false);
+        if !is_knative_service {
+            continue;
+        }
+        let svc_name = match obj_ref.name.as_deref() {
+            Some(n) => n.to_string(),
+            None => continue,
+        };
+        let summary = EventSummary {
+            reason: ev.reason.unwrap_or_default(),
+            message: ev.message.unwrap_or_default(),
+            count: ev.count.unwrap_or(1),
+            event_type: ev.type_.unwrap_or_else(|| "Normal".to_string()),
+        };
+        service_events.entry(svc_name).or_default().push(summary);
+    }
+    // Truncate each service to the last 5 events (list order from API is oldest-first).
+    for events in service_events.values_mut() {
+        if events.len() > 5 {
+            let drain_count = events.len() - 5;
+            events.drain(0..drain_count);
+        }
+    }
+
+    let summaries = services
+        .items
+        .into_iter()
+        .map(|svc| {
+            let name = svc.name_any();
+            let status = svc.status.as_ref();
+            let ready = extract_ready_status(status.and_then(|s| s.conditions.as_ref()));
+            let url = external_urls
+                .get(&name)
+                .cloned()
+                .or_else(|| status.and_then(|s| s.url.clone()));
+
+            let conditions = status
+                .and_then(|s| s.conditions.as_ref())
+                .map(|conds| {
+                    conds
+                        .iter()
+                        .map(|c| ConditionSummary {
+                            condition_type: c.condition_type.clone(),
+                            status: c.status.clone(),
+                            reason: c.reason.clone(),
+                            message: c.message.clone(),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            let latest_revision =
+                status.and_then(|s| s.latest_ready_revision_name.clone());
+
+            let image = latest_revision
+                .as_deref()
+                .and_then(|rev| revision_images.get(rev).cloned());
+
+            let events = service_events.remove(&name).unwrap_or_default();
+
+            ServiceSummary {
+                name,
+                namespace: namespace.clone(),
+                url,
+                ready,
+                conditions,
+                latest_revision,
+                image,
+                events,
+            }
+        })
+        .collect();
+
+    Ok(summaries)
+}
+
+/// Returns combined recent logs from all pods belonging to a Knative service.
+/// Pods are selected via the `serving.knative.dev/service=<name>` label.
+/// Each pod's last `tail_lines` lines are fetched and prefixed with the pod name.
+pub async fn fetch_logs(
+    client: Client,
+    namespace: String,
+    service_name: String,
+    tail_lines: i64,
+) -> Result<String, AppError> {
+    let pod_api: Api<Pod> = Api::namespaced(client, &namespace);
+    let selector = format!("serving.knative.dev/service={service_name}");
+    let pods = pod_api
+        .list(&ListParams::default().labels(&selector))
+        .await?;
+
+    if pods.items.is_empty() {
+        return Ok(String::from("No pods found for this service."));
+    }
+
+    let log_params = LogParams {
+        container: Some("user-container".to_string()),
+        tail_lines: Some(tail_lines),
+        ..Default::default()
+    };
+
+    let mut output = String::new();
+    for pod in &pods.items {
+        let pod_name = pod.name_any();
+        match pod_api.logs(&pod_name, &log_params).await {
+            Ok(logs) => {
+                output.push_str(&format!("=== {pod_name} ===\n"));
+                output.push_str(&logs);
+                if !logs.ends_with('\n') {
+                    output.push('\n');
+                }
+            }
+            Err(e) => {
+                output.push_str(&format!("=== {pod_name} (error) ===\n{e}\n"));
+            }
+        }
+    }
+
+    Ok(output)
+}
+
+/// Sends an HTTP GET to `url` and returns status code and latency.
+pub async fn execute_ping(
+    http_client: &reqwest::Client,
+    url: String,
+) -> Result<PingResult, AppError> {
+    let start = std::time::Instant::now();
+    let response = http_client.get(&url).send().await?;
+    let latency_ms = start.elapsed().as_millis() as u64;
+    Ok(PingResult {
+        status_code: response.status().as_u16(),
+        latency_ms,
+    })
+}
