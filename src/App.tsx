@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
+import { getCurrentWindow } from '@tauri-apps/api/window'
 import type { ServiceSummary } from './types'
 import { NamespaceSelector } from './components/NamespaceSelector'
 import { ServiceList } from './components/ServiceList'
@@ -11,6 +12,31 @@ export default function App() {
   const [services, setServices] = useState<ServiceSummary[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    const win = getCurrentWindow()
+    let timer: ReturnType<typeof setTimeout> | null = null
+
+    const unlistenPromise = win.onFocusChanged(({ payload: focused }) => {
+      if (!focused) {
+        timer = setTimeout(() => {
+          if (!document.hasFocus()) {
+            win.hide()
+          }
+        }, 150)
+      } else {
+        if (timer !== null) {
+          clearTimeout(timer)
+          timer = null
+        }
+      }
+    })
+
+    return () => {
+      if (timer !== null) clearTimeout(timer)
+      unlistenPromise.then(unlisten => unlisten())
+    }
+  }, [])
 
   useEffect(() => {
     invoke<string[]>('list_namespaces')

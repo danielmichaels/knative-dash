@@ -19,6 +19,7 @@ export interface ServiceSummary {
   namespace: string
   url: string | null
   ready: boolean
+  scaled_to_zero: boolean
   conditions: ConditionSummary[]
   latest_revision: string | null
   image: string | null

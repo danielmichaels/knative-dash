@@ -66,15 +66,32 @@ pub async fn fetch_services(
         })
         .collect();
 
-    // Build revision name → image map. Silently ignore errors (RBAC).
-    let revision_images: HashMap<String, String> = revisions
-        .map(|list| list.items)
-        .unwrap_or_default()
-        .into_iter()
+    // Build revision name → image and scaled-to-zero maps from a single pass.
+    // Silently ignore errors (RBAC may not permit listing Revisions).
+    let revisions_list = revisions.map(|list| list.items).unwrap_or_default();
+
+    let revision_images: HashMap<String, String> = revisions_list
+        .iter()
         .filter_map(|rev| {
             let name = rev.name_any();
-            let image = rev.spec.containers.into_iter().next().map(|c| c.image)?;
+            let image = rev.spec.containers.first().map(|c| c.image.clone())?;
+            if image.is_empty() { return None; }
             Some((name, image))
+        })
+        .collect();
+
+    let revision_scaled: HashMap<String, bool> = revisions_list
+        .iter()
+        .map(|rev| {
+            let name = rev.name_any();
+            let scaled = rev
+                .status
+                .as_ref()
+                .and_then(|s| s.conditions.as_ref())
+                .and_then(|conds| conds.iter().find(|c| c.condition_type == "Active"))
+                .map(|c| c.status == "False")
+                .unwrap_or(false);
+            (name, scaled)
         })
         .collect();
 
@@ -144,6 +161,11 @@ pub async fn fetch_services(
                 .as_deref()
                 .and_then(|rev| revision_images.get(rev).cloned());
 
+            let scaled_to_zero = latest_revision
+                .as_deref()
+                .and_then(|rev| revision_scaled.get(rev).copied())
+                .unwrap_or(false);
+
             let events = service_events.remove(&name).unwrap_or_default();
 
             ServiceSummary {
@@ -151,6 +173,7 @@ pub async fn fetch_services(
                 namespace: namespace.clone(),
                 url,
                 ready,
+                scaled_to_zero,
                 conditions,
                 latest_revision,
                 image,

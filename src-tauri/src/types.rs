@@ -41,11 +41,17 @@ pub mod knative {
         version = "v1",
         kind = "Revision",
         plural = "revisions",
-        namespaced
+        namespaced,
+        status = "KnativeRevisionStatus"
     )]
     pub struct RevisionSpec {
         #[serde(default)]
         pub containers: Vec<RevisionContainer>,
+    }
+
+    #[derive(Serialize, Deserialize, Default, Clone, Debug, JsonSchema)]
+    pub struct KnativeRevisionStatus {
+        pub conditions: Option<Vec<Condition>>,
     }
 
     #[derive(Serialize, Deserialize, Default, Clone, Debug, JsonSchema)]
@@ -102,6 +108,7 @@ pub struct ServiceSummary {
     pub namespace: String,
     pub url: Option<String>,
     pub ready: bool,
+    pub scaled_to_zero: bool,
     pub conditions: Vec<ConditionSummary>,
     pub latest_revision: Option<String>,
     pub image: Option<String>,
@@ -212,6 +219,7 @@ mod tests {
             namespace: "default".into(),
             url: Some("https://my-service.example.com".into()),
             ready: true,
+            scaled_to_zero: false,
             conditions: vec![],
             latest_revision: None,
             image: None,
