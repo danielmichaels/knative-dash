@@ -1,16 +1,20 @@
 import { useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
-import type { ServiceSummary, PingResult as PingResultType, ConditionSummary, EventSummary } from '../types'
+import type { ServiceSummary, PingResult as PingResultType, ConditionSummary, EventSummary, ConditionStatus } from '../types'
 import { PingResult } from './PingResult'
 
 interface Props {
   service: ServiceSummary
 }
 
+const conditionClass: Record<ConditionStatus, string> = {
+  True: 'cond-true',
+  Unknown: 'cond-unknown',
+  False: 'cond-false',
+}
+
 function ConditionRow({ c }: { c: ConditionSummary }) {
-  const ok = c.status === 'True'
-  const unknown = c.status === 'Unknown'
-  const cls = ok ? 'cond-true' : unknown ? 'cond-unknown' : 'cond-false'
+  const cls = conditionClass[c.status] ?? 'cond-false'
   return (
     <div className={`condition-row ${cls}`}>
       <span className="cond-type">{c.condition_type}</span>
@@ -36,6 +40,7 @@ export function ServiceCard({ service }: Props) {
   const [pingResult, setPingResult] = useState<PingResultType | null>(null)
   const [pingError, setPingError] = useState<string | null>(null)
   const [pinging, setPinging] = useState(false)
+  const [openError, setOpenError] = useState<string | null>(null)
   const [expanded, setExpanded] = useState(false)
   const [logs, setLogs] = useState<string | null>(null)
   const [logsError, setLogsError] = useState<string | null>(null)
@@ -84,7 +89,7 @@ export function ServiceCard({ service }: Props) {
     try {
       await invoke('open_url', { url: service.url })
     } catch (e) {
-      setPingError(String(e))
+      setOpenError(String(e))
     }
   }
 
@@ -120,6 +125,7 @@ export function ServiceCard({ service }: Props) {
         <PingResult result={pingResult} error={pingError} loading={pinging} />
       </div>
 
+      {openError && <div className="log-error">{openError}</div>}
       {logsError && <div className="log-error">{logsError}</div>}
       {logs !== null && (
         <pre className="log-viewer">{logs || '(no output)'}</pre>

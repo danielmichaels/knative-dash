@@ -1,6 +1,8 @@
+export type ConditionStatus = 'True' | 'False' | 'Unknown'
+
 export interface ConditionSummary {
   condition_type: string
-  status: string
+  status: ConditionStatus
   reason: string | null
   message: string | null
 }

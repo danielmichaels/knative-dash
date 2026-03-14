@@ -38,10 +38,14 @@ pub async fn fetch_services(
     let rev_api: Api<knative::Revision> = Api::namespaced(client.clone(), &namespace);
     let event_api: Api<Event> = Api::namespaced(client, &namespace);
 
-    let services = svc_api.list(&ListParams::default()).await?;
-    let ingress_routes = ir_api.list(&ListParams::default()).await;
-    let revisions = rev_api.list(&ListParams::default()).await;
-    let events = event_api.list(&ListParams::default()).await;
+    let lp = ListParams::default();
+    let (services, ingress_routes, revisions, events) = tokio::join!(
+        svc_api.list(&lp),
+        ir_api.list(&lp),
+        rev_api.list(&lp),
+        event_api.list(&lp),
+    );
+    let services = services?;
 
     // Build name → external URL map from IngressRoutes. Silently ignore errors
     // (RBAC may not permit listing IngressRoutes).
@@ -100,12 +104,10 @@ pub async fn fetch_services(
         };
         service_events.entry(svc_name).or_default().push(summary);
     }
-    // Truncate each service to the last 5 events (list order from API is oldest-first).
+    // Keep only the last 5 events per service (list order from API is oldest-first).
     for events in service_events.values_mut() {
-        if events.len() > 5 {
-            let drain_count = events.len() - 5;
-            events.drain(0..drain_count);
-        }
+        let keep = events.len().saturating_sub(5);
+        events.drain(..keep);
     }
 
     let summaries = services

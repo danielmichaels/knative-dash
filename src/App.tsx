@@ -25,24 +25,23 @@ export default function App() {
       })
   }, [])
 
-  useEffect(() => {
-    if (!selectedNs) return
+  function loadServices(ns: string) {
     setLoading(true)
     setError(null)
-    invoke<ServiceSummary[]>('list_services', { namespace: selectedNs })
+    invoke<ServiceSummary[]>('list_services', { namespace: ns })
       .then(setServices)
       .catch((e) => setError(String(e)))
       .finally(() => setLoading(false))
+  }
+
+  useEffect(() => {
+    if (!selectedNs) return
+    loadServices(selectedNs)
   }, [selectedNs])
 
   function handleRefresh() {
     if (!selectedNs) return
-    setLoading(true)
-    setError(null)
-    invoke<ServiceSummary[]>('list_services', { namespace: selectedNs })
-      .then(setServices)
-      .catch((e) => setError(String(e)))
-      .finally(() => setLoading(false))
+    loadServices(selectedNs)
   }
 
   return (

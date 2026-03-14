@@ -1,8 +1,8 @@
 [package]
 name = "knative-dash"
 version = "0.1.0"
-description = "A Tauri App"
-authors = ["you"]
+description = "A Toolbar App for Monitoring Knative functions"
+authors = ["Daniel Michaels"]
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -27,3 +27,4 @@ k8s-openapi = { version = "0.27", features = ["latest", "schemars"] }
 schemars = { version = "1" }
 reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
 thiserror = "2"
+tokio = { version = "1", features = ["full"] }
