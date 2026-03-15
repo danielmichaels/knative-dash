@@ -18,9 +18,11 @@ function ConditionRow({ c }: { c: ConditionSummary }) {
   return (
     <div className={`condition-row ${cls}`}>
       <span className="cond-type">{c.condition_type}</span>
-      <span className="cond-status">{c.status}</span>
-      {c.reason && <span className="cond-reason">{c.reason}</span>}
-      {c.message && <span className="cond-message">{c.message}</span>}
+      <div className="cond-body">
+        <span className="cond-status">{c.status}</span>
+        {c.reason && <span className="cond-reason">{c.reason}</span>}
+        {c.message && <span className="cond-message">{c.message}</span>}
+      </div>
     </div>
   )
 }
@@ -101,6 +103,9 @@ export function ServiceCard({ service }: Props) {
       <div className="card-header">
         <span className={`ready-badge ${service.ready ? 'badge-ready' : 'badge-not-ready'}`}>
           {service.ready ? 'Ready' : 'Not Ready'}
+        </span>
+        <span className={`instance-badge ${service.instance_count === 0 ? 'scaled-to-zero-badge' : 'instance-count-badge'}`}>
+          {service.instance_count === 0 ? 'Scaled to zero' : `${service.instance_count} instance${service.instance_count !== 1 ? 's' : ''}`}
         </span>
         <span className="service-name">{service.name}</span>
         {hasDetails && (
