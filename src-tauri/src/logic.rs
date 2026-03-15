@@ -9,6 +9,9 @@ use crate::types::{
     EventSummary, PingResult, ServiceSummary,
 };
 
+const KNATIVE_SERVICE_LABEL: &str = "serving.knative.dev/service";
+const POD_PHASE_RUNNING: &str = "Running";
+
 /// Returns namespace names that contain at least one Knative service.
 pub async fn fetch_namespaces_with_services(client: Client) -> Result<Vec<String>, AppError> {
     let api: Api<knative::Service> = Api::all(client);
@@ -36,14 +39,17 @@ pub async fn fetch_services(
     let svc_api: Api<knative::Service> = Api::namespaced(client.clone(), &namespace);
     let ir_api: Api<traefik::IngressRoute> = Api::namespaced(client.clone(), &namespace);
     let rev_api: Api<knative::Revision> = Api::namespaced(client.clone(), &namespace);
-    let event_api: Api<Event> = Api::namespaced(client, &namespace);
+    let event_api: Api<Event> = Api::namespaced(client.clone(), &namespace);
+    let pod_api: Api<Pod> = Api::namespaced(client, &namespace);
 
-    let lp = ListParams::default();
-    let (services, ingress_routes, revisions, events) = tokio::join!(
-        svc_api.list(&lp),
-        ir_api.list(&lp),
-        rev_api.list(&lp),
-        event_api.list(&lp),
+    let lp = &ListParams::default();
+    let pod_lp = &ListParams::default().labels(KNATIVE_SERVICE_LABEL);
+    let (services, ingress_routes, revisions, events, pods) = tokio::join!(
+        svc_api.list(lp),
+        ir_api.list(lp),
+        rev_api.list(lp),
+        event_api.list(lp),
+        pod_api.list(pod_lp),
     );
     let services = services?;
 
@@ -66,34 +72,39 @@ pub async fn fetch_services(
         })
         .collect();
 
-    // Build revision name → image and scaled-to-zero maps from a single pass.
-    // Silently ignore errors (RBAC may not permit listing Revisions).
-    let revisions_list = revisions.map(|list| list.items).unwrap_or_default();
-
-    let revision_images: HashMap<String, String> = revisions_list
-        .iter()
+    // Build revision name → image map. Silently ignore errors (RBAC).
+    let revision_images: HashMap<String, String> = revisions
+        .map(|list| list.items)
+        .unwrap_or_default()
+        .into_iter()
         .filter_map(|rev| {
             let name = rev.name_any();
-            let image = rev.spec.containers.first().map(|c| c.image.clone())?;
+            let image = rev.spec.containers.into_iter().next().map(|c| c.image)?;
             if image.is_empty() { return None; }
             Some((name, image))
         })
         .collect();
 
-    let revision_scaled: HashMap<String, bool> = revisions_list
-        .iter()
-        .map(|rev| {
-            let name = rev.name_any();
-            let scaled = rev
-                .status
-                .as_ref()
-                .and_then(|s| s.conditions.as_ref())
-                .and_then(|conds| conds.iter().find(|c| c.condition_type == "Active"))
-                .map(|c| c.status == "False")
-                .unwrap_or(false);
-            (name, scaled)
-        })
-        .collect();
+    // Count running pods per service. One namespace-wide list, grouped by
+    // the `serving.knative.dev/service` label. Silently ignore RBAC errors.
+    let mut instance_counts: HashMap<String, u32> = HashMap::new();
+    for pod in pods.map(|list| list.items).unwrap_or_default() {
+        let is_running = pod
+            .status
+            .as_ref()
+            .and_then(|s| s.phase.as_deref())
+            == Some(POD_PHASE_RUNNING);
+        if !is_running {
+            continue;
+        }
+        if let Some(svc_name) = pod
+            .labels()
+            .get(KNATIVE_SERVICE_LABEL)
+            .map(|s| s.to_owned())
+        {
+            *instance_counts.entry(svc_name).or_default() += 1;
+        }
+    }
 
     // Build service name → recent events map. Filter to Knative Service objects only,
     // keep the 5 most recent by lastTimestamp (or creationTimestamp as fallback).
@@ -125,6 +136,10 @@ pub async fn fetch_services(
     for events in service_events.values_mut() {
         let keep = events.len().saturating_sub(5);
         events.drain(..keep);
+        if events.len() > 5 {
+            let start = events.len() - 5;
+            events.drain(0..start);
+        }
     }
 
     let summaries = services
@@ -161,10 +176,7 @@ pub async fn fetch_services(
                 .as_deref()
                 .and_then(|rev| revision_images.get(rev).cloned());
 
-            let scaled_to_zero = latest_revision
-                .as_deref()
-                .and_then(|rev| revision_scaled.get(rev).copied())
-                .unwrap_or(false);
+            let instance_count = instance_counts.get(&name).copied().unwrap_or(0);
 
             let events = service_events.remove(&name).unwrap_or_default();
 
@@ -173,7 +185,7 @@ pub async fn fetch_services(
                 namespace: namespace.clone(),
                 url,
                 ready,
-                scaled_to_zero,
+                instance_count,
                 conditions,
                 latest_revision,
                 image,
@@ -195,7 +207,7 @@ pub async fn fetch_logs(
     tail_lines: i64,
 ) -> Result<String, AppError> {
     let pod_api: Api<Pod> = Api::namespaced(client, &namespace);
-    let selector = format!("serving.knative.dev/service={service_name}");
+    let selector = format!("{KNATIVE_SERVICE_LABEL}={service_name}");
     let pods = pod_api
         .list(&ListParams::default().labels(&selector))
         .await?;

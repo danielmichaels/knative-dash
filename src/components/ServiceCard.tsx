@@ -104,9 +104,9 @@ export function ServiceCard({ service }: Props) {
         <span className={`ready-badge ${service.ready ? 'badge-ready' : 'badge-not-ready'}`}>
           {service.ready ? 'Ready' : 'Not Ready'}
         </span>
-        {service.scaled_to_zero && (
-          <span className="scaled-to-zero-badge">Scaled to zero</span>
-        )}
+        <span className={`instance-badge ${service.instance_count === 0 ? 'scaled-to-zero-badge' : 'instance-count-badge'}`}>
+          {service.instance_count === 0 ? 'Scaled to zero' : `${service.instance_count} instance${service.instance_count !== 1 ? 's' : ''}`}
+        </span>
         <span className="service-name">{service.name}</span>
         {hasDetails && (
           <button className="expand-btn" onClick={() => setExpanded(e => !e)}>

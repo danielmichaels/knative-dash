@@ -16,6 +16,10 @@ pub struct AppState {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("failed to install rustls crypto provider");
+
     tauri::Builder::default()
         .plugin(tauri_plugin_positioner::init())
         .plugin(tauri_plugin_opener::init())
@@ -34,10 +38,7 @@ pub fn run() {
             let quit = MenuItem::with_id(app, "quit", "Exit", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&quit])?;
 
-            let icon = app
-                .default_window_icon()
-                .expect("no default window icon configured")
-                .clone();
+            let icon = tauri::include_image!("icons/32x32.png");
 
             TrayIconBuilder::new()
                 .icon(icon)
@@ -46,6 +47,9 @@ pub fn run() {
                 .menu(&menu)
                 .show_menu_on_left_click(false)
                 .on_tray_icon_event(|tray, event| {
+                    // Let the positioner plugin record the tray icon position before we use it.
+                    tauri_plugin_positioner::on_tray_event(tray.app_handle(), &event);
+
                     if let TrayIconEvent::Click {
                         button: MouseButton::Left,
                         button_state: MouseButtonState::Up,
