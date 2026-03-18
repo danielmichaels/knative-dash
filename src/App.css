@@ -108,6 +108,12 @@ select:disabled, button:disabled {
   border-left: 3px solid #ef4444;
 }
 
+.card-refreshing {
+  border-color: #86efac;
+  box-shadow: 0 0 0 2px rgba(134, 239, 172, 0.15);
+  transition: border-color 0.3s, box-shadow 0.3s;
+}
+
 .card-header {
   display: flex;
   align-items: center;

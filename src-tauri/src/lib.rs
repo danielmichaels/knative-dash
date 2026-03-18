@@ -2,8 +2,9 @@ mod commands;
 mod error;
 mod logic;
 mod types;
+mod watcher;
 
-use commands::{get_logs, list_namespaces, list_services, open_url, ping_service};
+use commands::{fetch_one_service, get_logs, list_namespaces, list_services, open_url, ping_service};
 use tauri::Manager;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -12,6 +13,7 @@ use tauri_plugin_positioner::{Position, WindowExt};
 pub struct AppState {
     pub kube_client: kube::Client,
     pub http_client: reqwest::Client,
+    pub watched_ns: std::sync::Arc<tokio::sync::RwLock<String>>,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -30,7 +32,15 @@ pub fn run() {
                 .timeout(std::time::Duration::from_secs(60))
                 .build()
                 .map_err(|e| format!("http client error: {e}"))?;
-            app.manage(AppState { kube_client, http_client });
+            app.manage(AppState {
+                kube_client,
+                http_client,
+                watched_ns: std::sync::Arc::new(tokio::sync::RwLock::new(String::new())),
+            });
+            let watcher_client = app.state::<AppState>().kube_client.clone();
+            let watcher_handle = app.handle().clone();
+            let watcher_ns = app.state::<AppState>().watched_ns.clone();
+            tauri::async_runtime::spawn(watcher::run_watchers(watcher_client, watcher_handle, watcher_ns));
 
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
@@ -83,6 +93,7 @@ pub fn run() {
             ping_service,
             open_url,
             get_logs,
+            fetch_one_service,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
