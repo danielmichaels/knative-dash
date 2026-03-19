@@ -5,6 +5,8 @@ import { PingResult } from './PingResult'
 
 interface Props {
   service: ServiceSummary
+  onRefresh: (name: string) => void
+  isRefreshing: boolean
 }
 
 const conditionClass: Record<ConditionStatus, string> = {
@@ -38,7 +40,7 @@ function EventRow({ e }: { e: EventSummary }) {
   )
 }
 
-export function ServiceCard({ service }: Props) {
+export function ServiceCard({ service, onRefresh, isRefreshing }: Props) {
   const [pingResult, setPingResult] = useState<PingResultType | null>(null)
   const [pingError, setPingError] = useState<string | null>(null)
   const [pinging, setPinging] = useState(false)
@@ -83,6 +85,7 @@ export function ServiceCard({ service }: Props) {
       setPingError(String(e))
     } finally {
       setPinging(false)
+      onRefresh(service.name)
     }
   }
 
@@ -90,6 +93,7 @@ export function ServiceCard({ service }: Props) {
     if (!service.url) return
     try {
       await invoke('open_url', { url: service.url })
+      onRefresh(service.name)
     } catch (e) {
       setOpenError(String(e))
     }
@@ -99,7 +103,7 @@ export function ServiceCard({ service }: Props) {
     service.conditions.length > 0 || service.image || service.latest_revision || service.events.length > 0
 
   return (
-    <div className={`service-card ${service.ready ? 'card-ready' : 'card-not-ready'}`}>
+    <div className={`service-card ${service.ready ? 'card-ready' : 'card-not-ready'}${isRefreshing ? ' card-refreshing' : ''}`}>
       <div className="card-header">
         <span className={`ready-badge ${service.ready ? 'badge-ready' : 'badge-not-ready'}`}>
           {service.ready ? 'Ready' : 'Not Ready'}

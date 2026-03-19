@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
+import { listen } from '@tauri-apps/api/event'
 import type { ServiceSummary } from './types'
 import { NamespaceSelector } from './components/NamespaceSelector'
 import { ServiceList } from './components/ServiceList'
@@ -12,6 +13,22 @@ export default function App() {
   const [services, setServices] = useState<ServiceSummary[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+
+  const selectedNsRef = useRef(selectedNs)
+  useEffect(() => { selectedNsRef.current = selectedNs }, [selectedNs])
+
+  const [refreshingNames, setRefreshingNames] = useState<Set<string>>(new Set())
+
+  function markRefreshing(name: string) {
+    setRefreshingNames(prev => new Set(prev).add(name))
+    setTimeout(() => {
+      setRefreshingNames(prev => {
+        const next = new Set(prev)
+        next.delete(name)
+        return next
+      })
+    }, 600)
+  }
 
   useEffect(() => {
     const win = getCurrentWindow()
@@ -70,6 +87,38 @@ export default function App() {
     loadServices(selectedNs)
   }
 
+  async function refreshOneService(name: string) {
+    try {
+      const updated = await invoke<ServiceSummary | null>('fetch_one_service', {
+        namespace: selectedNsRef.current,
+        name,
+      })
+      if (updated === null) {
+        setServices(prev => prev.filter(s => s.name !== name))
+      } else {
+        setServices(prev => prev.map(s => s.name === updated.name ? updated : s))
+      }
+    } catch {
+      // silent — watcher errors shouldn't surface in UI
+    }
+  }
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined
+    listen<ServiceSummary>('service-updated', ({ payload }) => {
+      if (payload.namespace !== selectedNsRef.current) return
+      setServices(prev => {
+        const idx = prev.findIndex(s => s.name === payload.name)
+        if (idx === -1) return [...prev, payload]
+        const next = [...prev]
+        next[idx] = payload
+        return next
+      })
+      markRefreshing(payload.name)
+    }).then(fn => { unlisten = fn })
+    return () => { unlisten?.() }
+  }, [])
+
   return (
     <main className="app">
       <header className="app-header">
@@ -89,7 +138,12 @@ export default function App() {
 
       {error && <div className="error-banner">{error}</div>}
 
-      <ServiceList services={services} loading={loading} />
+      <ServiceList
+        services={services}
+        loading={loading}
+        onRefresh={refreshOneService}
+        isRefreshingName={(name) => refreshingNames.has(name)}
+      />
     </main>
   )
 }
