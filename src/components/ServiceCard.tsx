@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import type { ServiceSummary, PingResult as PingResultType, ConditionSummary, EventSummary, ConditionStatus } from '../types'
 import { PingResult } from './PingResult'
+import { LogViewer } from './LogViewer'
 
 interface Props {
   service: ServiceSummary
@@ -46,29 +47,7 @@ export function ServiceCard({ service, onRefresh, isRefreshing }: Props) {
   const [pinging, setPinging] = useState(false)
   const [openError, setOpenError] = useState<string | null>(null)
   const [expanded, setExpanded] = useState(false)
-  const [logs, setLogs] = useState<string | null>(null)
-  const [logsError, setLogsError] = useState<string | null>(null)
-  const [loadingLogs, setLoadingLogs] = useState(false)
-
-  async function handleLogs() {
-    if (logs !== null) {
-      setLogs(null)
-      return
-    }
-    setLoadingLogs(true)
-    setLogsError(null)
-    try {
-      const result = await invoke<string>('get_logs', {
-        namespace: service.namespace,
-        serviceName: service.name,
-      })
-      setLogs(result)
-    } catch (e) {
-      setLogsError(String(e))
-    } finally {
-      setLoadingLogs(false)
-    }
-  }
+  const [showLogs, setShowLogs] = useState(false)
 
   async function handlePing() {
     if (!service.url) {
@@ -128,16 +107,20 @@ export function ServiceCard({ service, onRefresh, isRefreshing }: Props) {
         <button onClick={handleOpen} disabled={!service.url}>
           Open
         </button>
-        <button onClick={handleLogs} disabled={loadingLogs}>
-          {loadingLogs ? 'Loading…' : logs !== null ? 'Hide Logs' : 'Logs'}
+        <button onClick={() => setShowLogs(prev => !prev)}>
+          {showLogs ? 'Hide Logs' : 'Logs'}
         </button>
         <PingResult result={pingResult} error={pingError} loading={pinging} />
       </div>
 
       {openError && <div className="log-error">{openError}</div>}
-      {logsError && <div className="log-error">{logsError}</div>}
-      {logs !== null && (
-        <pre className="log-viewer">{logs || '(no output)'}</pre>
+      {showLogs && (
+        <LogViewer
+          namespace={service.namespace}
+          serviceName={service.name}
+          instanceCount={service.instance_count}
+          onClose={() => setShowLogs(false)}
+        />
       )}
 
       {expanded && (
