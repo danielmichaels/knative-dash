@@ -4,6 +4,8 @@ A macOS menu-bar app for monitoring Knative services running on Kubernetes. Buil
 
 ## What
 
+![knative-dash](https://github.com/user-attachments/assets/ee5172d1-1723-498d-a33d-55e58cf561bf)
+
 Knative Explorer lives in your menu bar and gives you a quick overview of your Knative services without switching to a terminal or dashboard. It shows service status, conditions, events, running pod counts, and lets you stream logs and ping endpoints — all from a single dropdown panel.
 
 ## Why
