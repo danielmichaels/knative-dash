@@ -4,16 +4,22 @@ mod logic;
 mod types;
 mod watcher;
 
-use commands::{fetch_one_service, get_logs, list_namespaces, list_services, open_url, ping_service};
+use commands::{
+    fetch_one_service, list_namespaces, list_pods, list_services, open_url, pause_log_stream,
+    ping_service, resume_log_stream, stop_log_stream, stream_logs,
+};
+use logic::LogStreamHandle;
+use std::sync::Mutex;
 use tauri::Manager;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri_plugin_positioner::{Position, WindowExt};
+use tauri::{PhysicalPosition};
 
 pub struct AppState {
     pub kube_client: kube::Client,
     pub http_client: reqwest::Client,
     pub watched_ns: std::sync::Arc<tokio::sync::RwLock<String>>,
+    pub log_stream: std::sync::Arc<Mutex<Option<LogStreamHandle>>>,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -23,7 +29,6 @@ pub fn run() {
         .expect("failed to install rustls crypto provider");
 
     tauri::Builder::default()
-        .plugin(tauri_plugin_positioner::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let kube_client = tauri::async_runtime::block_on(kube::Client::try_default())
@@ -36,6 +41,7 @@ pub fn run() {
                 kube_client,
                 http_client,
                 watched_ns: std::sync::Arc::new(tokio::sync::RwLock::new(String::new())),
+                log_stream: std::sync::Arc::new(Mutex::new(None)),
             });
             let watcher_client = app.state::<AppState>().kube_client.clone();
             let watcher_handle = app.handle().clone();
@@ -57,12 +63,10 @@ pub fn run() {
                 .menu(&menu)
                 .show_menu_on_left_click(false)
                 .on_tray_icon_event(|tray, event| {
-                    // Let the positioner plugin record the tray icon position before we use it.
-                    tauri_plugin_positioner::on_tray_event(tray.app_handle(), &event);
-
                     if let TrayIconEvent::Click {
                         button: MouseButton::Left,
                         button_state: MouseButtonState::Up,
+                        rect,
                         ..
                     } = event
                     {
@@ -71,8 +75,16 @@ pub fn run() {
                             if window.is_visible().unwrap_or(false) {
                                 let _ = window.hide();
                             } else {
-                                let _ = window.move_window(Position::TrayCenter);
                                 let _ = window.show();
+                                if let Ok(scale) = window.scale_factor() {
+                                    let tray_pos = rect.position.to_physical::<f64>(scale);
+                                    let tray_size = rect.size.to_physical::<f64>(scale);
+                                    if let Ok(win_size) = window.outer_size() {
+                                        let x = tray_pos.x + (tray_size.width / 2.0) - (win_size.width as f64 / 2.0);
+                                        let y = tray_pos.y;
+                                        let _ = window.set_position(PhysicalPosition::new(x, y));
+                                    }
+                                }
                                 let _ = window.set_focus();
                             }
                         }
@@ -92,7 +104,11 @@ pub fn run() {
             list_services,
             ping_service,
             open_url,
-            get_logs,
+            list_pods,
+            stream_logs,
+            pause_log_stream,
+            resume_log_stream,
+            stop_log_stream,
             fetch_one_service,
         ])
         .run(tauri::generate_context!())

@@ -1,16 +1,29 @@
 use k8s_openapi::api::core::v1::{Event, Pod};
 use kube::api::{ListParams, LogParams};
 use kube::{Api, Client, ResourceExt};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use futures::{AsyncBufReadExt, StreamExt};
+use tauri::ipc::Channel;
 
 use crate::error::AppError;
 use crate::types::{
     extract_ingress_hostname, extract_ready_status, knative, traefik, ConditionSummary,
-    EventSummary, PingResult, ServiceSummary,
+    EventSummary, LogEvent, PingResult, PodInfo, ServiceSummary,
 };
 
 pub(crate) const KNATIVE_SERVICE_LABEL: &str = "serving.knative.dev/service";
 const POD_PHASE_RUNNING: &str = "Running";
+
+static STREAM_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+pub struct LogStreamHandle {
+    pub abort_handle: tokio::task::AbortHandle,
+    pub paused: Arc<AtomicBool>,
+    pub channel: Channel<LogEvent>,
+    generation: u64,
+}
 
 fn summarize_conditions(
     conditions: Option<&Vec<knative::Condition>>,
@@ -291,49 +304,179 @@ pub async fn fetch_one_service(
     }))
 }
 
-/// Returns combined recent logs from all pods belonging to a Knative service.
-/// Pods are selected via the `serving.knative.dev/service=<name>` label.
-/// Each pod's last `tail_lines` lines are fetched and prefixed with the pod name.
-pub async fn fetch_logs(
+pub async fn list_pods(
     client: Client,
     namespace: String,
     service_name: String,
-    tail_lines: i64,
-) -> Result<String, AppError> {
+) -> Result<Vec<PodInfo>, AppError> {
     let pod_api: Api<Pod> = Api::namespaced(client, &namespace);
     let selector = format!("{KNATIVE_SERVICE_LABEL}={service_name}");
     let pods = pod_api
         .list(&ListParams::default().labels(&selector))
         .await?;
 
-    if pods.items.is_empty() {
-        return Ok(String::from("No pods found for this service."));
-    }
+    let result = pods
+        .items
+        .iter()
+        .map(|pod| {
+            let name = pod.name_any();
+            let phase = pod
+                .status
+                .as_ref()
+                .and_then(|s| s.phase.clone())
+                .unwrap_or_else(|| "Unknown".to_string());
+            PodInfo { name, phase }
+        })
+        .collect();
 
-    let log_params = LogParams {
-        container: Some("user-container".to_string()),
-        tail_lines: Some(tail_lines),
-        ..Default::default()
-    };
+    Ok(result)
+}
 
-    let mut output = String::new();
-    for pod in &pods.items {
-        let pod_name = pod.name_any();
-        match pod_api.logs(&pod_name, &log_params).await {
-            Ok(logs) => {
-                output.push_str(&format!("=== {pod_name} ===\n"));
-                output.push_str(&logs);
-                if !logs.ends_with('\n') {
-                    output.push('\n');
-                }
-            }
-            Err(e) => {
-                output.push_str(&format!("=== {pod_name} (error) ===\n{e}\n"));
-            }
+pub fn start_log_stream(
+    client: Client,
+    namespace: String,
+    pod_name: String,
+    tail_lines: i64,
+    channel: Channel<LogEvent>,
+    log_stream: Arc<Mutex<Option<LogStreamHandle>>>,
+) -> Result<(), AppError> {
+    let generation = STREAM_GENERATION.fetch_add(1, Ordering::Relaxed) + 1;
+
+    {
+        let mut guard = log_stream.lock().expect("log_stream mutex poisoned");
+        if let Some(handle) = guard.take() {
+            handle.abort_handle.abort();
         }
     }
 
-    Ok(output)
+    let pod_api: Api<Pod> = Api::namespaced(client, &namespace);
+    let paused = Arc::new(AtomicBool::new(false));
+    let paused_clone = paused.clone();
+    let channel_clone = channel.clone();
+    let log_stream_clone = log_stream.clone();
+
+    let task = tokio::spawn(async move {
+        let log_params = LogParams {
+            container: Some("user-container".to_string()),
+            follow: true,
+            tail_lines: Some(tail_lines),
+            ..Default::default()
+        };
+
+        let stream = match pod_api.log_stream(&pod_name, &log_params).await {
+            Ok(s) => s,
+            Err(e) => {
+                let _ = channel_clone.send(LogEvent::Error {
+                    message: e.to_string(),
+                });
+                clear_if_current(&log_stream_clone, generation);
+                return;
+            }
+        };
+
+        if channel_clone.send(LogEvent::StreamStarted).is_err() {
+            clear_if_current(&log_stream_clone, generation);
+            return;
+        }
+
+        let mut lines = stream.lines();
+        let mut is_history = true;
+        let mut buffer: VecDeque<String> = VecDeque::new();
+        let mut dropped_count: usize = 0;
+
+        loop {
+            let line_result: Option<Result<String, std::io::Error>> = if is_history {
+                match tokio::time::timeout(
+                    std::time::Duration::from_millis(500),
+                    lines.next(),
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(_) => {
+                        is_history = false;
+                        continue;
+                    }
+                }
+            } else {
+                lines.next().await
+            };
+
+            match line_result {
+                Some(Ok(line)) => {
+                    if paused_clone.load(Ordering::Relaxed) {
+                        buffer.push_back(line);
+                        if buffer.len() > 10_000 {
+                            buffer.pop_front();
+                            dropped_count += 1;
+                        }
+                        continue;
+                    }
+
+                    if dropped_count > 0 {
+                        if channel_clone
+                            .send(LogEvent::BufferOverflow { dropped_count })
+                            .is_err()
+                        {
+                            break;
+                        }
+                        dropped_count = 0;
+                    }
+
+                    while let Some(buffered) = buffer.pop_front() {
+                        if channel_clone
+                            .send(LogEvent::Line {
+                                text: buffered,
+                                is_history: false,
+                            })
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+
+                    if channel_clone
+                        .send(LogEvent::Line {
+                            text: line,
+                            is_history,
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                None => {
+                    let _ = channel_clone.send(LogEvent::StreamEnded);
+                    break;
+                }
+                Some(Err(e)) => {
+                    let _ = channel_clone.send(LogEvent::Error {
+                        message: e.to_string(),
+                    });
+                    break;
+                }
+            }
+        }
+
+        clear_if_current(&log_stream_clone, generation);
+    });
+
+    let mut guard = log_stream.lock().expect("log_stream mutex poisoned");
+    *guard = Some(LogStreamHandle {
+        abort_handle: task.abort_handle(),
+        paused,
+        channel,
+        generation,
+    });
+
+    Ok(())
+}
+
+fn clear_if_current(log_stream: &Mutex<Option<LogStreamHandle>>, generation: u64) {
+    let mut guard = log_stream.lock().expect("log_stream mutex poisoned");
+    if guard.as_ref().is_some_and(|h| h.generation == generation) {
+        *guard = None;
+    }
 }
 
 /// Sends an HTTP GET to `url` and returns status code and latency.

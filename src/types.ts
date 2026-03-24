@@ -30,3 +30,17 @@ export interface PingResult {
   status_code: number
   latency_ms: number
 }
+
+export type LogEvent =
+  | { kind: 'line'; text: string; isHistory: boolean }
+  | { kind: 'streamStarted' }
+  | { kind: 'paused' }
+  | { kind: 'resumed' }
+  | { kind: 'error'; message: string }
+  | { kind: 'bufferOverflow'; droppedCount: number }
+  | { kind: 'streamEnded' }
+
+export interface PodInfo {
+  name: string
+  phase: string
+}

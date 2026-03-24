@@ -121,6 +121,32 @@ pub struct PingResult {
     pub latency_ms: u64,
 }
 
+#[derive(Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum LogEvent {
+    Line {
+        text: String,
+        is_history: bool,
+    },
+    StreamStarted,
+    Paused,
+    Resumed,
+    Error {
+        message: String,
+    },
+    BufferOverflow {
+        dropped_count: usize,
+    },
+    StreamEnded,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PodInfo {
+    pub name: String,
+    pub phase: String,
+}
+
 /// Extracts the first hostname from a Traefik match rule like `Host(`foo.example.com`)`.
 pub fn extract_ingress_hostname(rule: &str) -> Option<String> {
     let start = rule.find('`')? + 1;
@@ -238,5 +264,37 @@ mod tests {
         let back: PingResult = serde_json::from_str(&json).unwrap();
         assert_eq!(back.status_code, 200);
         assert_eq!(back.latency_ms, 312);
+    }
+
+    #[test]
+    fn log_event_line_serializes_with_kind_tag() {
+        let ev = LogEvent::Line { text: "hello".into(), is_history: true };
+        let json = serde_json::to_value(&ev).unwrap();
+        assert_eq!(json["kind"], "line");
+        assert_eq!(json["text"], "hello");
+        assert_eq!(json["isHistory"], true);
+    }
+
+    #[test]
+    fn log_event_stream_started_serializes() {
+        let ev = LogEvent::StreamStarted;
+        let json = serde_json::to_value(&ev).unwrap();
+        assert_eq!(json["kind"], "streamStarted");
+    }
+
+    #[test]
+    fn log_event_buffer_overflow_serializes() {
+        let ev = LogEvent::BufferOverflow { dropped_count: 42 };
+        let json = serde_json::to_value(&ev).unwrap();
+        assert_eq!(json["kind"], "bufferOverflow");
+        assert_eq!(json["droppedCount"], 42);
+    }
+
+    #[test]
+    fn pod_info_serializes_camel_case() {
+        let pod = PodInfo { name: "my-pod".into(), phase: "Running".into() };
+        let json = serde_json::to_value(&pod).unwrap();
+        assert_eq!(json["name"], "my-pod");
+        assert_eq!(json["phase"], "Running");
     }
 }
